@@ -1,0 +1,30 @@
+﻿version: '3.8'
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: db_agent_suite/Dockerfile.api
+    ports:
+      - "8000:8000"
+    # Pass all variables from the .env file directly into the API container
+    env_file:
+      - .env
+    networks:
+      - dba_network
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.web
+    ports:
+      - "3000:3000"
+    environment:
+      - API_URL=http://api:8000
+    depends_on:
+      - api
+    networks:
+      - dba_network
+
+networks:
+  dba_network:

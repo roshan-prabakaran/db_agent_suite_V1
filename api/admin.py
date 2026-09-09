@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 import psycopg2
 from db_agent_suite.api.auth import get_current_user
-from db_agent_suite.database.queries import get_employees, set_employee_permission, get_connection_cipher_key, decrypt_data, save_user_connection
+from db_agent_suite.database.queries import get_employees, delete_employee, set_employee_permission, get_connection_cipher_key, decrypt_data, save_user_connection
 from db_agent_suite.database.connection import get_master_db_cursor
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -42,6 +42,20 @@ def require_admin(user: dict = Depends(get_current_user)):
 def list_employees(user: dict = Depends(require_admin)):
     rows = get_employees()
     return {"employees": [{"id": r[0], "email": r[1]} for r in rows]}
+
+@router.delete("/employees/{employee_id}")
+def remove_employee(employee_id: int, user: dict = Depends(require_admin)):
+    """
+    Permanently delete an employee account and all their associated data:
+    permissions, sessions, and the auth record. Admins cannot be deleted via this endpoint.
+    """
+    # Safety: prevent deleting yourself
+    if user["id"] == employee_id:
+        raise HTTPException(status_code=400, detail="You cannot delete your own account.")
+    success = delete_employee(employee_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete employee. They may not exist or may be an admin.")
+    return {"message": "Employee deleted successfully."}
 
 @router.get("/connections")
 def list_all_connections(user: dict = Depends(require_admin)):
@@ -130,9 +144,9 @@ def get_connection_tables(connection_id: int, user: dict = Depends(require_admin
 def get_employee_permissions(employee_id: int, user: dict = Depends(require_admin)):
     try:
         with get_master_db_cursor() as cursor:
-            cursor.execute("ALTER TABLE db_connection_permissions ADD COLUMN IF NOT EXISTS allowed_tables TEXT[] DEFAULT NULL;")
-            cursor.execute("ALTER TABLE db_connection_permissions ADD COLUMN IF NOT EXISTS can_create_tables BOOLEAN DEFAULT FALSE;")
-            cursor.execute("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS can_add_db BOOLEAN DEFAULT FALSE;")
+            
+            
+            
             cursor.connection.commit()
             cursor.execute("""
                 SELECT connection_id, can_read, can_write, allowed_tables,
@@ -166,9 +180,10 @@ def set_global_permission(req: GlobalPermRequest, user: dict = Depends(require_a
     """Set global user-level permissions like can_add_db."""
     try:
         with get_master_db_cursor(commit=True) as cursor:
-            cursor.execute("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS can_add_db BOOLEAN DEFAULT FALSE;")
+            
             cursor.execute("UPDATE auth_users SET can_add_db = %s WHERE id = %s;", (req.can_add_db, req.employee_id))
         return {"message": "Global permission updated"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 

@@ -76,12 +76,9 @@ class DBAgent:
     LangGraph MemorySaver checkpointer.
     """
 
-    def __init__(self, groq_api_key=None, openai_api_key=None):
-        from db_agent_suite.gateway.llm_gateway import LLMGateway
-        self.gateway = LLMGateway(
-            groq_api_key=groq_api_key,
-            openai_api_key=openai_api_key
-        )
+    def __init__(self):
+        from db_agent_suite.gateway.llm_gateway import llm_gateway
+        self.gateway = llm_gateway
 
     def run(
         self,
@@ -185,7 +182,7 @@ class DBAgent:
                 "available_connections": available_connections or [],
                 "user_info":             user_info or {},
             }
-        }
+        } 
 
         # Add Langfuse tracing callback if available
         langfuse_handler = obs_manager.get_langchain_handler(session_id=session_id)
@@ -228,3 +225,31 @@ class DBAgent:
             "message": last_text,
             "messages": messages,
         }
+
+
+"""
+chat.py receives a user question
+        ↓
+DBAgent.run()
+        ↓
+Build config:
+session ID + selected DB + permissions + available DBs
+        ↓
+Call LangGraph
+        ↓
+Graph checks prompt safety
+        ↓
+LLM gives answer or asks to use database tools
+        ↓
+If SQL write:
+graph pauses for approval
+        ↓
+DBAgent returns pending_approval
+        ↓
+User approves/rejects
+        ↓
+DBAgent.resume()
+        ↓
+Final agent response returned to API
+
+"""

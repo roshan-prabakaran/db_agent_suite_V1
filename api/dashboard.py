@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+﻿from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from db_agent_suite.api.auth import get_current_user
 from db_agent_suite.database.connection import get_master_db_cursor
@@ -12,32 +12,13 @@ class PinRequest(BaseModel):
     chart_json: str
     title: str
 
-def ensure_table():
-    with get_master_db_cursor(commit=True) as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS pinned_charts (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER NOT NULL REFERENCES auth_users(id),
-                session_id VARCHAR(255),
-                title VARCHAR(255),
-                chart_json TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        # Idempotent column addition
-        try:
-            cur.execute("ALTER TABLE pinned_charts ADD COLUMN connection_id INTEGER;")
-        except:
-            pass # Column already exists
-        # Update old rows if any without connection_id? Can't really know, just leave as null
-
 @router.post("/pins")
 def add_pin(req: PinRequest, user: dict = Depends(get_current_user)):
     try: json.loads(req.chart_json)
     except: raise HTTPException(status_code=400, detail="Invalid chart JSON")
 
     try:
-        ensure_table()
+        # ensure_table() removed
         with get_master_db_cursor(commit=True) as cur:
             cur.execute("""
                 INSERT INTO pinned_charts (user_id, session_id, connection_id, title, chart_json)
@@ -51,7 +32,7 @@ def add_pin(req: PinRequest, user: dict = Depends(get_current_user)):
 @router.get("/pins")
 def list_pins(user: dict = Depends(get_current_user)):
     try:
-        ensure_table()
+        # ensure_table() removed
         with get_master_db_cursor() as cur:
             cur.execute("SELECT id, session_id, connection_id, title, chart_json FROM pinned_charts WHERE user_id = %s ORDER BY created_at DESC;", (user["id"],))
             rows = cur.fetchall()
@@ -68,3 +49,4 @@ def delete_pin(pin_id: int, user: dict = Depends(get_current_user)):
         return {"message": "Deleted"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+

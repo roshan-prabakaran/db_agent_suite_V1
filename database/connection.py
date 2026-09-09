@@ -2,8 +2,9 @@
 connection.py
 
 Manages thread-safe PostgreSQL connection pools dynamically.
-Supports session-specific active connections in Streamlit, thread-local overrides,
-and defaults to environment variables.
+Supports thread-local overrides for the active target database and
+defaults to environment variables.
+
 """
 
 import logging
@@ -11,15 +12,14 @@ import threading
 import psycopg2
 from psycopg2 import pool
 from contextlib import contextmanager
-
 from db_agent_suite import config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("DBConnection")
 
-# Thread-local storage for programmatic overrides (e.g. background tasks or custom runners)
+# Thread-local storage for programmatic overrides (e.g. per-request target DB from the agent)
 _thread_local = threading.local()
-
+print(_thread_local)
 # Dictionary mapping cache keys to psycopg2 connection pools
 _connection_pools = {}
 _pools_lock = threading.Lock()
@@ -28,7 +28,7 @@ _pools_lock = threading.Lock()
 def set_thread_db_config(config: dict):
     """
     Set database connection parameters for the current thread.
-    Useful for background jobs or scripts running outside Streamlit.
+    Used by tools to route queries to the user's selected target database.
     """
     _thread_local.db_config = config
 
@@ -45,24 +45,14 @@ def get_current_db_config() -> dict:
     """
     Resolve the active database connection credentials.
     Priority:
-      1. Thread-local override
-      2. Streamlit session_state active config
-      3. Environment variables (fallback)
+      1. Thread-local override (set by agent tools for the selected target DB)
+      2. Environment variables (fallback / master DB)
     """
-    # 1. Thread local override
+    # 1. Thread-local override (set by agent tools)
     if hasattr(_thread_local, "db_config") and _thread_local.db_config:
         return _thread_local.db_config
 
-    # 2. Streamlit session state
-    try:
-        import streamlit as st
-        # Verify that Streamlit is running and has active session state
-        if st.runtime.exists() and "active_db_config" in st.session_state and st.session_state.active_db_config:
-            return st.session_state.active_db_config
-    except Exception:
-        pass
-
-    # 3. Fallback to Environment Variables
+    # 2. Fallback to Environment Variables
     return {
         "host": config.POSTGRES_HOST,
         "port": config.POSTGRES_PORT,
@@ -70,6 +60,7 @@ def get_current_db_config() -> dict:
         "user": config.POSTGRES_USER,
         "password": config.POSTGRES_PASSWORD,
     }
+
 
 
 def get_master_db_config() -> dict:
@@ -81,6 +72,7 @@ def get_master_db_config() -> dict:
         "user": config.POSTGRES_USER,
         "password": config.POSTGRES_PASSWORD,
     }
+
 
 
 def get_connection_pool():
@@ -149,7 +141,9 @@ def get_db_cursor(commit=False):
 
 @contextmanager
 def get_master_db_cursor(commit=False):
+
     """Cursor for accounts, permissions, and chat history stored in the suite DB."""
+
     previous = getattr(_thread_local, "db_config", None)
     set_thread_db_config(get_master_db_config())
     try:
@@ -160,7 +154,6 @@ def get_master_db_cursor(commit=False):
             set_thread_db_config(previous)
         else:
             clear_thread_db_config()
-
 
 def test_connection(config: dict = None):
     """

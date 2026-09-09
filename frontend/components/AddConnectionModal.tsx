@@ -92,7 +92,7 @@ export default function AddConnectionModal({ onClose, onAdded }: AddConnectionMo
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1.5">Username</label>
-              <input type="text" placeholder="roshanprabhakaran80@gmail.com" value={form.user} onChange={e => set("user", e.target.value)}
+              <input type="text" placeholder="postgres" value={form.user} onChange={e => set("user", e.target.value)}
                 className="w-full rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 px-3 py-2.5 text-sm text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 focus:border-violet-400 focus:bg-white dark:focus:bg-slate-600 focus:outline-none focus:ring-2 focus:ring-violet-400/20 transition-all" required />
             </div>
             <div>

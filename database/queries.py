@@ -23,9 +23,11 @@ def create_user(email: str, password_raw: str):
         with get_master_db_cursor(commit=True) as cursor:
             cursor.execute("SELECT COUNT(*) FROM auth_users;")
             role = "admin" if cursor.fetchone()[0] == 0 else "employee"
+            # Ensure can_add_db column exists (idempotent migration)
+            
             cursor.execute(
-                "INSERT INTO auth_users (email, password_hash, account_role) VALUES (%s, %s, %s) RETURNING id;",
-                (email, p_hash, role)
+                "INSERT INTO auth_users (email, password_hash, account_role, can_add_db) VALUES (%s, %s, %s, %s) RETURNING id;",
+                (email, p_hash, role, role == "admin")  # only admins get can_add_db=True by default
             )
             uid = cursor.fetchone()[0]
             return uid, role
@@ -46,7 +48,44 @@ def migrate_connection_password(connection_id: int, password: str):
             (encrypt_data(password, get_connection_cipher_key()), connection_id),
         )
 
-def load_user_connections(user_id: int, user_key: str, role: str):
+def migrate_all_legacy_connections(user_id: int, user_password_raw: str, role: str):
+    """Called once at login to automatically migrate any legacy connections encrypted with the raw password."""
+    try:
+        with get_master_db_cursor() as cursor:
+            if role == "admin":
+                cursor.execute("SELECT id, encrypted_password FROM db_connections WHERE user_id = %s;", (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT c.id, c.encrypted_password 
+                    FROM db_connections c
+                    JOIN db_connection_permissions p ON p.connection_id = c.id
+                    WHERE p.employee_id = %s
+                """, (user_id,))
+            rows = cursor.fetchall()
+            
+            cipher_key = get_connection_cipher_key()
+            for r in rows:
+                conn_id = r[0]
+                enc_pass = r[1]
+                # Test if it's already using the global cipher key
+                try:
+                    decrypt_data(enc_pass, cipher_key)
+                    continue # It's fine
+                except Exception:
+                    pass
+                
+                # Test if it's using the raw password
+                try:
+                    dec_pass = decrypt_data(enc_pass, user_password_raw)
+                    # Migrate to global key
+                    migrate_connection_password(conn_id, dec_pass)
+                    logger.info(f"Migrated connection {conn_id} to global cipher key during login.")
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.error(f"Migration error: {e}")
+
+def load_user_connections(user_id: int, role: str):
     try:
         with get_master_db_cursor() as cursor:
             if role == "admin":
@@ -78,16 +117,9 @@ def load_user_connections(user_id: int, user_key: str, role: str):
                 dec_pass = ""
                 try:
                     dec_pass = decrypt_data(r[6], cipher_key)
-                except Exception:
-                    # Fallback: try user's raw password as key (legacy support)
-                    try:
-                        dec_pass = decrypt_data(r[6], user_key)
-                        # Migrate to global key
-                        migrate_connection_password(r[0], dec_pass)
-                        logger.info(f"Migrated connection {r[0]} to global cipher key")
-                    except Exception as e2:
-                        logger.warning(f"Could not decrypt connection {r[0]}: {e2}")
-                        dec_pass = ""
+                except Exception as e2:
+                    logger.warning(f"Could not decrypt connection {r[0]}: {e2}")
+                    
                 connections.append({
                     "id": r[0],
                     "name": r[1],
@@ -106,8 +138,7 @@ def load_user_connections(user_id: int, user_key: str, role: str):
         logger.error(f"Failed to load saved connections: {e}")
     return []
 
-
-def save_user_connection(user_id: int, name: str, conn_config: dict, user_key: str):
+def save_user_connection(user_id: int, name: str, conn_config: dict):
     enc_pass = encrypt_data(conn_config["password"], get_connection_cipher_key())
     try:
         with get_master_db_cursor(commit=True) as cursor:
@@ -135,10 +166,27 @@ def get_employees():
         cursor.execute("SELECT id, email FROM auth_users WHERE account_role = 'employee' ORDER BY email;")
         return cursor.fetchall()
 
+def delete_employee(employee_id: int) -> bool:
+    """
+    Permanently remove an employee and all associated data:
+      - db_connection_permissions  (their DB access grants)
+      - user_sessions              (their active sessions)
+      - auth_users                 (the account itself)
+    """
+    try:
+        with get_master_db_cursor(commit=True) as cursor:
+            cursor.execute("DELETE FROM db_connection_permissions WHERE employee_id = %s;", (employee_id,))
+            cursor.execute("DELETE FROM user_sessions WHERE user_id = %s;", (employee_id,))
+            cursor.execute("DELETE FROM auth_users WHERE id = %s AND account_role = 'employee';", (employee_id,))
+        return True
+    except Exception as e:
+        logger.error(f"Failed to delete employee {employee_id}: {e}")
+    return False
+
 def set_employee_permission(connection_id: int, employee_id: int, can_read: bool, can_write: bool, allowed_tables=None, can_create_tables: bool = False):
     with get_master_db_cursor(commit=True) as cursor:
-        cursor.execute("ALTER TABLE db_connection_permissions ADD COLUMN IF NOT EXISTS allowed_tables TEXT[] DEFAULT NULL;")
-        cursor.execute("ALTER TABLE db_connection_permissions ADD COLUMN IF NOT EXISTS can_create_tables BOOLEAN DEFAULT FALSE;")
+        
+        
         cursor.execute("""
             INSERT INTO db_connection_permissions (connection_id, employee_id, can_read, can_write, allowed_tables, can_create_tables)
             VALUES (%s, %s, %s, %s, %s, %s)
@@ -146,5 +194,6 @@ def set_employee_permission(connection_id: int, employee_id: int, can_read: bool
             DO UPDATE SET can_read = EXCLUDED.can_read, can_write = EXCLUDED.can_write,
                           allowed_tables = EXCLUDED.allowed_tables, can_create_tables = EXCLUDED.can_create_tables;
         """, (connection_id, employee_id, can_read, can_write, allowed_tables, can_create_tables))
+
 
 

@@ -7,6 +7,7 @@ interface User {
   id: number;
   email: string;
   role: string;
+  can_add_db: boolean;
 }
 
 export interface SessionRecord {

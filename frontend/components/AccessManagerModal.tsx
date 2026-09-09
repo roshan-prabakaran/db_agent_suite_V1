@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { X, Check, Loader2 } from "lucide-react";
+import { X, Check, Loader2, Trash2, AlertTriangle } from "lucide-react";
 
 interface Employee { id: number; email: string; }
 interface Connection { id: number; name: string; }
@@ -19,6 +19,8 @@ export default function AccessManagerModal({ onClose }: { onClose: () => void })
   const [success, setSuccess] = useState("");
   const [loadingTables, setLoadingTables] = useState(false);
   const [loadingPerms, setLoadingPerms] = useState(false);
+  const [deletingEmployee, setDeletingEmployee] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   // New DB form state
   const [showNewDb, setShowNewDb] = useState(false);
@@ -80,6 +82,29 @@ export default function AccessManagerModal({ onClose }: { onClose: () => void })
         else setSuccess("❌ Failed to save global permissions");
       } catch { setSuccess("❌ Network error"); }
       finally { setSaving(false); }
+  };
+
+  const handleDeleteEmployee = async () => {
+    if (selectedEmployee === null) return;
+    setDeletingEmployee(true); setSuccess("");
+    try {
+      const res = await fetch(`/api/admin/employees/${selectedEmployee}`, { method: "DELETE" });
+      const data = await res.json();
+      if (res.ok) {
+        setSuccess("✅ Employee deleted successfully.");
+        // Reset state and refresh employee list
+        setSelectedEmployee(null);
+        setSelectedConn(null);
+        setExistingPerms({});
+        setConfirmDelete(false);
+        const d = await fetch("/api/admin/employees").then(r => r.json());
+        setEmployees(d.employees || []);
+      } else {
+        setSuccess("❌ " + (data.detail || "Failed to delete employee."));
+        setConfirmDelete(false);
+      }
+    } catch { setSuccess("❌ Network error."); setConfirmDelete(false); }
+    finally { setDeletingEmployee(false); }
   };
 
   const handleSave = async () => {
@@ -156,15 +181,54 @@ export default function AccessManagerModal({ onClose }: { onClose: () => void })
             <label className="block text-xs font-semibold text-slate-600 mb-1.5">
               1. Select Employee
             </label>
-            <select
-              className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-800 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-400/20"
-              value={selectedEmployee ?? ""}
-              onChange={e => { setSelectedEmployee(e.target.value ? Number(e.target.value) : null); setSelectedConn(null); setSuccess(""); }}
-            >
-              <option value="">— choose an employee —</option>
-              {employees.map(emp => <option key={emp.id} value={emp.id}>{emp.email}</option>)}
-            </select>
+            <div className="flex gap-2">
+              <select
+                className="flex-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-800 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-400/20"
+                value={selectedEmployee ?? ""}
+                onChange={e => { setSelectedEmployee(e.target.value ? Number(e.target.value) : null); setSelectedConn(null); setSuccess(""); setConfirmDelete(false); }}
+              >
+                <option value="">— choose an employee —</option>
+                {employees.map(emp => <option key={emp.id} value={emp.id}>{emp.email}</option>)}
+              </select>
+              {selectedEmployee !== null && (
+                <button
+                  onClick={() => setConfirmDelete(true)}
+                  title="Delete this employee"
+                  className="h-10 w-10 flex-shrink-0 flex items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-rose-500 hover:bg-rose-100 hover:border-rose-300 transition-colors"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              )}
+            </div>
             {employees.length === 0 && <p className="text-xs text-amber-600 mt-1">No employees found. Register an account to create employee users.</p>}
+
+            {/* Delete confirmation banner */}
+            {confirmDelete && selectedEmployee !== null && (
+              <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 space-y-2">
+                <div className="flex items-center gap-2 text-rose-700">
+                  <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+                  <span className="text-xs font-bold">Permanently delete this employee?</span>
+                </div>
+                <p className="text-xs text-rose-600">
+                  This will remove their account, all permissions, and all active sessions. This action cannot be undone.
+                </p>
+                <div className="flex gap-2 pt-1">
+                  <button
+                    onClick={handleDeleteEmployee}
+                    disabled={deletingEmployee}
+                    className="flex-1 rounded-lg bg-rose-600 hover:bg-rose-700 py-2 text-xs font-bold text-white transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5"
+                  >
+                    {deletingEmployee ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Deleting…</> : <><Trash2 className="h-3.5 w-3.5" /> Yes, Delete Employee</>}
+                  </button>
+                  <button
+                    onClick={() => setConfirmDelete(false)}
+                    className="flex-1 rounded-lg border border-slate-200 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Step 1.5: Global Permissions */}
@@ -223,7 +287,11 @@ export default function AccessManagerModal({ onClose }: { onClose: () => void })
               
               {!showNewDb ? (
                 <button
-                  onClick={() => { setShowNewDb(true); setSelectedConn(null); }}
+                  onClick={() => {
+                    setNewDb({ name: "", host: "", port: 5432, database: "", user: "", password: "", can_read: true, can_write: false, can_create_tables: false });
+                    setShowNewDb(true);
+                    setSelectedConn(null);
+                  }}
                   className="mt-3 w-full border border-dashed border-slate-300 rounded-lg py-2.5 text-xs font-semibold text-violet-600 hover:bg-violet-50 hover:border-violet-300 transition-colors"
                 >
                   + Add New DB for this Employee
@@ -267,7 +335,7 @@ export default function AccessManagerModal({ onClose }: { onClose: () => void })
                 <div className="grid grid-cols-2 gap-3 mb-3">
                   {[
                     { label: "Read (SELECT)", key: "can_read" },
-                    { label: "Write (INSERT / UPDATE / DELETE)", key: "can_write" },
+                    { label: "Write (INSERT / UPDATE)", key: "can_write" },
                     { label: "Create/Modify Tables (DDL)", key: "can_create_tables" }
                   ].map(({ label, key }) => (
                     <label key={key} className="flex items-center gap-2 cursor-pointer select-none bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 flex-1">

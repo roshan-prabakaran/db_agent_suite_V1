@@ -1,8 +1,8 @@
-import os
+﻿import os
 from pathlib import Path
 
 # Load .env file for local development.
-# In production Docker, env vars are injected by the runtime — load_dotenv
+# In production Docker, env vars are injected by the runtime - load_dotenv
 # is a no-op when variables are already set, so this is safe in both cases.
 try:
     from dotenv import load_dotenv
@@ -35,8 +35,39 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
 
 # =============================================================
-# LLM GATEWAY (Groq / OpenAI)
+# LITELLM GATEWAY & DUAL VIRTUAL KEYS
 # =============================================================
+# Base URL for self-hosted LiteLLM Proxy (e.g. https://litellm.stic.softwareteam.duckdns.org or http://172.16.48.97:4000/v1)
+LITELLM_PROXY_BASE_URL = os.getenv(
+    "LITELLM_PROXY_BASE_URL", 
+    os.getenv("LOCAL_LITELLM_BASE_URL", "")
+).rstrip("/")
+
+# Virtual Key 1: For Local Models (Qwen 2.5, Llama Guard 3)
+LITELLM_LOCAL_API_KEY = os.getenv(
+    "LITELLM_LOCAL_API_KEY", 
+    os.getenv("LOCAL_LITELLM_API_KEY", os.getenv("LITELLM_VIRTUAL_KEY_LOCAL", ""))
+)
+
+# Virtual Key 2: For Online Models (Groq / OpenAI fallbacks)
+LITELLM_ONLINE_API_KEY = os.getenv(
+    "LITELLM_ONLINE_API_KEY", 
+    os.getenv("ONLINE_LITELLM_API_KEY", os.getenv("LITELLM_VIRTUAL_KEY_ONLINE", ""))
+)
+
+# Primary Local Models
+LOCAL_GUARDRAIL_MODEL = os.getenv("LOCAL_GUARDRAIL_MODEL", "llama-guard-3-1b")
+LOCAL_CHAT_MODEL = os.getenv(
+    "LOCAL_CHAT_MODEL", 
+    os.getenv("LOCAL_LITELLM_MODEL", "qwen-2.5-7b-instruct")
+)
+
+# Online Fallback Models
+ONLINE_GUARDRAIL_MODEL = os.getenv("ONLINE_GUARDRAIL_MODEL", "groq/openai/gpt-oss-safeguard-20b")
+ONLINE_FALLBACK_MODEL_1 = os.getenv("ONLINE_FALLBACK_MODEL_1", "groq/openai/gpt-oss-120b")
+ONLINE_FALLBACK_MODEL_2 = os.getenv("ONLINE_FALLBACK_MODEL_2", "groq/openai/gpt-oss-20b")
+
+# Direct Provider Keys (used as ultimate safety net)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -46,3 +77,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY")
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY")
 LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com"))
+
+# =============================================================
+# SECURITY
+# =============================================================
+HTTPS_SECURE = os.getenv("HTTPS_SECURE", "false").lower() == "true"

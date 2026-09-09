@@ -160,10 +160,13 @@ export default function Home() {
         <div className="px-4 pt-4 pb-2">
           <div className="flex items-center justify-between mb-2">
             <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">Databases</span>
-            <button onClick={() => setShowAddConn(true)} className="h-6 w-6 rounded-md flex items-center justify-center bg-violet-50 dark:bg-violet-900/30 hover:bg-violet-100 dark:hover:bg-violet-900/50 text-violet-600 dark:text-violet-400 transition-colors" title="Add Connection">
-              <Plus className="h-3.5 w-3.5" />
-            </button>
+            {(user.role === "admin" || user.can_add_db) && (
+              <button onClick={() => setShowAddConn(true)} className="h-6 w-6 rounded-md flex items-center justify-center bg-violet-50 dark:bg-violet-900/30 hover:bg-violet-100 dark:hover:bg-violet-900/50 text-violet-600 dark:text-violet-400 transition-colors" title="Add Connection">
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
+
           <div className="space-y-0.5 max-h-48 overflow-y-auto">
             {connections.length === 0 ? (
               <p className="text-xs text-slate-400 dark:text-slate-600 italic px-2 py-2">No databases added yet.</p>
@@ -252,10 +255,16 @@ export default function Home() {
                 <p className="text-sm mt-1">{activeConnectionId ? "Type your question below to get started." : "Select a database from the sidebar first."}</p>
               </div>
               {!activeConnectionId && (
-                <button onClick={() => setShowAddConn(true)} className="flex items-center gap-2 rounded-lg border border-dashed border-violet-300 dark:border-violet-700/50 px-4 py-2 text-sm text-violet-500 dark:text-violet-400 hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-colors">
-                  <Plus className="h-4 w-4" /> Add a database connection
-                </button>
+                (user.role === "admin" || user.can_add_db) ? (
+                  <button onClick={() => setShowAddConn(true)} className="flex items-center gap-2 rounded-lg border border-dashed border-violet-300 dark:border-violet-700/50 px-4 py-2 text-sm text-violet-500 dark:text-violet-400 hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-colors">
+                    <Plus className="h-4 w-4" /> Add a database connection
+                  </button>
+                ) : (
+                  <p className="text-xs text-slate-400 dark:text-slate-500 italic">Contact your admin to get database access.</p>
+                )
               )}
+
+
             </div>
           ) : messages.map((msg, idx) => (
             <div key={idx} className={`flex items-start gap-3 ${msg.role === "user" ? "flex-row-reverse" : ""}`}>

@@ -5,7 +5,6 @@ Password hashing (using PBKDF2-HMAC-SHA256) and database credentials encryption 
 No external bcrypt or passlib dependencies required.
 """
 
-import os
 import base64
 import hashlib
 import secrets

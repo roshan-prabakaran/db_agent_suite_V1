@@ -7,7 +7,7 @@ Tool safety model:
   - list_tables  → always safe
   - get_schema   → always safe
   - query_db     → SELECT only (guardrail enforced)
-  - modify_db    → INSERT/UPDATE/DELETE, requires user approval via
+  - modify_db    → INSERT/UPDATE, requires user approval via
                    LangGraph interrupt() before execution
 """
 
@@ -30,7 +30,6 @@ logger = logging.getLogger("AgentTools")
 # =============================================================
 
 APPROVED_QUERIES: set = set()
-
 
 # =============================================================
 # SESSION-LEVEL ACTIVE DB CONFIG STORE
@@ -117,26 +116,44 @@ def has_permission(config, permission: str) -> bool:
 @tool
 def list_tables(config: RunnableConfig = None) -> str:
     """
-    List all tables available in the connected PostgreSQL database.
+    List all tables available to the current user in the connected PostgreSQL database.
     Call this first to understand what data exists before writing any queries.
     """
     if not has_permission(config, "can_read"):
         return "ERROR: You do not have read access to this database."
 
-    query = """
-    SELECT table_name
-    FROM information_schema.tables
-    WHERE table_schema = 'public'
-      AND table_type = 'BASE TABLE';
-    """
+    # Extract allowed_tables from permissions
+    permissions = {}
+    if config:
+        if hasattr(config, "configurable"):
+            permissions = config.configurable.get("permissions", {})
+        elif isinstance(config, dict):
+            permissions = config.get("configurable", {}).get("permissions", {})
+    allowed_tables = permissions.get("allowed_tables")
+
     with use_tool_db_config(config):
         try:
             with get_db_cursor() as cursor:
-                cursor.execute(query)
+                if allowed_tables is not None:
+                    # Enforce at the DB query level — only show allowed tables
+                    if not allowed_tables:
+                        return "You do not have access to any tables in this database."
+                    placeholders = ", ".join(["%s"] * len(allowed_tables))
+                    cursor.execute(
+                        f"SELECT table_name FROM information_schema.tables "
+                        f"WHERE table_schema = 'public' AND table_type = 'BASE TABLE' "
+                        f"AND table_name IN ({placeholders}) ORDER BY table_name;",
+                        tuple(allowed_tables)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name;"
+                    )
                 tables = cursor.fetchall()
                 if not tables:
-                    return "No tables found in the public schema."
-                return "Tables in the database:\n" + "\n".join([f"- {t[0]}" for t in tables])
+                    return "No accessible tables found."
+                return "Tables you have access to:\n" + "\n".join([f"- {t[0]}" for t in tables])
         except Exception as e:
             logger.error(f"Error listing tables: {e}")
             return f"Error listing tables: {str(e)}"
@@ -156,6 +173,17 @@ def get_schema(table_name: str, config: RunnableConfig = None) -> str:
 
     # Sanitize to prevent injection in catalog query
     table_name_clean = re.sub(r"[^a-zA-Z0-9_]", "", table_name)
+
+    # Enforce allowed_tables restriction
+    permissions = {}
+    if config:
+        if hasattr(config, "configurable"):
+            permissions = config.configurable.get("permissions", {})
+        elif isinstance(config, dict):
+            permissions = config.get("configurable", {}).get("permissions", {})
+    allowed_tables = permissions.get("allowed_tables")
+    if allowed_tables is not None and table_name_clean not in allowed_tables:
+        return f"Access denied: you do not have permission to view the schema of table '{table_name_clean}'."
 
     column_query = """
     SELECT column_name, data_type, is_nullable
@@ -257,20 +285,26 @@ def query_db(sql_query: str, config: RunnableConfig = None) -> str:
 @tool
 def modify_db(sql_query: str, config: RunnableConfig = None) -> str:
     """
-    Execute a data-modifying SQL statement (INSERT, UPDATE, DELETE).
-    This will pause and ask the user for explicit approval before executing.
+    Execute a data-modifying SQL statement (INSERT or UPDATE only).
+    ALWAYS invoke this tool immediately whenever the user wants to insert or update data.
+    Do NOT ask the user for approval in chat before calling this tool — calling this tool automatically triggers the system's interactive user-approval prompt.
     Use create_table for CREATE TABLE statements — do NOT pass CREATE here.
+    DELETE statements are NEVER allowed and will be immediately rejected.
 
     Args:
-        sql_query: A valid PostgreSQL INSERT, UPDATE, or DELETE statement.
+        sql_query: A valid PostgreSQL INSERT or UPDATE statement.
     """
+    # Hard block: DELETE is never allowed for anyone, no exceptions
+    if re.search(r"\bDELETE\b", sql_query.strip().upper()):
+        return "ERROR: DELETE operations are permanently disabled in this system. No data can be deleted by any user."
+
     if not has_permission(config, "can_write"):
         return "ERROR: You do not have permission to modify this database."
 
-    # Safety gate: block destructive DDL
+    # Safety gate: block destructive DDL / DELETE via guardrails
     analysis = analyze_sql_safety(sql_query)
     if not analysis["safe"]:
-        return f"ERROR: Destructive query blocked. Use create_table tool for CREATE TABLE. Details: {analysis['message']}"
+        return f"ERROR: {analysis['message']}"
 
     if analysis["type"] == "read":
         return "ERROR: Use query_db for SELECT queries, not modify_db."
@@ -300,24 +334,28 @@ def modify_db(sql_query: str, config: RunnableConfig = None) -> str:
             logger.error(f"Error executing write query: {e}")
             return f"Database Error during modification: {str(e)}"
 
-
 @tool
 def create_table(sql_query: str, config: RunnableConfig = None) -> str:
     """
-    Execute a CREATE TABLE (or ALTER TABLE / DROP TABLE) DDL statement.
-    This will pause and ask the user for explicit approval before executing.
-    Use this tool whenever the user asks to create, alter, or drop a table.
+    Execute a CREATE TABLE or ALTER TABLE DDL statement.
+    ALWAYS invoke this tool directly whenever the user asks to create or alter tables.
+    Do NOT ask the user for approval in chat before calling this tool — calling this tool automatically triggers the system's interactive user-approval prompt.
+    DROP TABLE and DROP INDEX are permanently banned and will be immediately refused.
 
     Args:
-        sql_query: A valid PostgreSQL DDL statement (CREATE TABLE, ALTER TABLE, DROP TABLE, etc.)
+        sql_query: A valid PostgreSQL DDL statement (CREATE TABLE, ALTER TABLE, CREATE INDEX only).
     """
+    # Hard block: DROP is never allowed for anyone
+    upper = sql_query.strip().upper()
+    if re.search(r"\bDROP\b", upper):
+        return "ERROR: DROP operations are permanently disabled in this system. Tables cannot be dropped by any user."
+
     if not has_permission(config, "can_write"):
         return "ERROR: You do not have permission to create or alter tables in this database."
 
-    upper = sql_query.strip().upper()
-    allowed_ddl = ("CREATE TABLE", "CREATE INDEX", "ALTER TABLE", "DROP TABLE", "DROP INDEX")
+    allowed_ddl = ("CREATE TABLE", "CREATE INDEX", "ALTER TABLE")
     if not any(upper.startswith(k) for k in allowed_ddl):
-        return "ERROR: create_table only accepts CREATE TABLE, ALTER TABLE, DROP TABLE, CREATE INDEX, DROP INDEX statements."
+        return "ERROR: create_table only accepts CREATE TABLE, ALTER TABLE, CREATE INDEX statements. DROP TABLE is not allowed."
 
     norm_query = " ".join(sql_query.strip().split())
     approved_normalized = {" ".join(q.strip().split()) for q in APPROVED_QUERIES}
@@ -560,8 +598,7 @@ def add_database_connection(
     conn_id = save_user_connection(
         user_id=user_info["id"],
         name=name,
-        conn_config={"host": host, "port": port, "database": database, "user": user, "password": password},
-        user_key=user_info.get("user_key", "")
+        conn_config={"host": host, "port": port, "database": database, "user": user, "password": password}
     )
 
     if not conn_id:

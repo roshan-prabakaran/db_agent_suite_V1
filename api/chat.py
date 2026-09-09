@@ -46,7 +46,7 @@ def send_message(req: ChatRequest, user: dict = Depends(get_current_user)):
     
     # Load ALL connections the user can access — needed for prompt-based switching
     from db_agent_suite.database.queries import load_user_connections
-    all_connections = load_user_connections(user["id"], user.get("user_key", ""), user["role"])
+    all_connections = load_user_connections(user["id"], user["role"])
 
     # Resolve the currently-selected connection as the initial active DB
     active_config = None
@@ -81,7 +81,7 @@ def send_message(req: ChatRequest, user: dict = Depends(get_current_user)):
         db_config=active_config,
         permissions=active_permissions,
         available_connections=all_connections,   # ← full list for switching
-        user_info={"id": user["id"], "user_key": user.get("user_key", ""), "role": user.get("role", "")}
+        user_info={"id": user["id"], "role": user.get("role", "")}
     )
 
     logger.info(f"Agent result status: {result.get('status')}, messages count: {len(result.get('messages', []))}")
@@ -115,11 +115,27 @@ def send_message(req: ChatRequest, user: dict = Depends(get_current_user)):
 
     new_messages = []
     for new_msg in new_msgs_raw:
-        content_str = getattr(new_msg, "content", "") or ""
-        
+        raw_content = getattr(new_msg, "content", "") or ""
+        if isinstance(raw_content, list):
+            text_parts = [
+                part.get("text", "") for part in raw_content 
+                if isinstance(part, dict) and part.get("type") == "text"
+            ]
+            content_str = "\n".join(text_parts).strip() if text_parts else ""
+        else:
+            content_str = str(raw_content).strip()
+
+        # Sanitize repetitive token streams (... ... ... / We... / Okay...)
+        if content_str:
+            import re
+            content_str = re.sub(r'(?:\.\s*|\u2026\s*|- \s*){6,}', '', content_str)
+            content_str = re.sub(r'(\n\s*\.\.\.\s*){2,}', '\n', content_str)
+            content_str = re.sub(r'\n{3,}', '\n\n', content_str).strip()
+
         # Skip internal messages that only contain tool calls or are empty
         if not content_str:
             continue
+
 
         role = new_msg.type if hasattr(new_msg, "type") else new_msg.get("role", "assistant")
         if role == "ai":
@@ -153,7 +169,7 @@ def approve_query(req: ApproveRequest, user: dict = Depends(get_current_user)):
 
     if req.connection_id:
         from db_agent_suite.database.queries import load_user_connections
-        connections = load_user_connections(user["id"], user["user_key"], user["role"])
+        connections = load_user_connections(user["id"], user["role"])
         conn = next((c for c in connections if c["id"] == req.connection_id), None)
         if conn:
             active_config = {"host": conn["host"], "port": conn["port"], "database": conn["database"], "user": conn["user"], "password": conn["password"]}

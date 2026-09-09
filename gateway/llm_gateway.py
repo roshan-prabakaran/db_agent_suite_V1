@@ -96,6 +96,19 @@ def setup_langfuse_observability():
         logger.warning("Langfuse keys missing. Tracing will run in MOCK mode.")
 
 
+def _format_proxy_model(name: str) -> str:
+    """
+    Ensure the model name is prefixed with 'openai/' so LiteLLM client
+    routes through the proxy's /chat/completions endpoint rather than
+    interpreting provider prefixes (like groq/, meta-llama/) directly.
+    """
+    if not name:
+        return ""
+    if name.startswith("openai/"):
+        return name
+    return f"openai/{name}"
+
+
 # =============================================================
 # LLM GATEWAY
 # =============================================================
@@ -113,44 +126,15 @@ class LLMGateway:
     - Failure logging
     """
 
-    def __init__(
-        self,
-        groq_api_key=None,
-        openai_api_key=None,
-    ):
-
-        # ---------------------------------------------------------
-        # API KEYS
-        # ---------------------------------------------------------
-
-        self.groq_api_key = (
-            groq_api_key
-            or config.GROQ_API_KEY
-        )
-
-        self.openai_api_key = (
-            openai_api_key
-            or config.OPENAI_API_KEY
-        )
-
-        # ---------------------------------------------------------
-        # Langfuse
-        # ---------------------------------------------------------
-
+    def __init__(self):
+        """
+        All LLM calls route exclusively through the self-hosted LiteLLM Proxy.
+        Two virtual keys control access to two model groups:
+          - LITELLM_LOCAL_API_KEY  → local models (Qwen 2.5, Llama Guard)
+          - LITELLM_ONLINE_API_KEY → online fallback models (Groq)
+        """
         setup_langfuse_observability()
-
-        # ---------------------------------------------------------
-        # Router
-        # ---------------------------------------------------------
-
-        self.router = (
-            self._initialize_router()
-        )
-
-        # ---------------------------------------------------------
-        # Cache
-        # ---------------------------------------------------------
-
+        self.router = self._initialize_router()
         self._configure_caching()
 
     # =========================================================
@@ -158,178 +142,64 @@ class LLMGateway:
     # =========================================================
 
     def _initialize_router(self) -> Router:
+        """
+        Build a LiteLLM Router where all models are accessed through
+        the self-hosted LiteLLM proxy using two virtual keys:
+          primary-model    → LOCAL_CHAT_MODEL  (local virtual key)
+          fallback-model-1 → ONLINE_FALLBACK_MODEL_1 (online virtual key)
+          fallback-model-2 → ONLINE_FALLBACK_MODEL_2 (online virtual key)
+        """
+        proxy_url = config.LITELLM_PROXY_BASE_URL
+        local_key = config.LITELLM_LOCAL_API_KEY
+        online_key = config.LITELLM_ONLINE_API_KEY
 
-        model_list = []
-
-        # =====================================================
-        # GROQ MODELS
-        # =====================================================
-
-        if self.groq_api_key:
-
-            # -------------------------------------------------
-            # PRIMARY
-            # -------------------------------------------------
-
-            model_list.append({
-
-                "model_name": "primary-model",
-
-                "litellm_params": {
-
-                    "model":
-                        "groq/openai/gpt-oss-120b",
-
-                    "api_key":
-                        self.groq_api_key,
-                }
-            })
-
-            # -------------------------------------------------
-            # FALLBACK 1
-            # -------------------------------------------------
-
-            model_list.append({
-
-                "model_name":
-                    "fallback-model-1",
-
-                "litellm_params": {
-
-                    # IMPORTANT:
-                    # GPT-OSS is hosted by Groq.
-                    # Therefore explicitly use groq/.
-                    "model":
-                        "groq/openai/gpt-oss-20b",
-
-                    "api_key":
-                        self.groq_api_key,
-                }
-            })
-
-        # =====================================================
-        # OPENAI
-        # =====================================================
-
-        elif self.openai_api_key:
-
-            model_list.append({
-
-                "model_name":
-                    "openai-primary",
-
-                "litellm_params": {
-
-                    "model":
-                        "openai/gpt-4o-mini",
-
-                    "api_key":
-                        self.openai_api_key,
-                }
-            })
-
-        # =====================================================
-        # NO KEYS
-        # =====================================================
-
-        if not model_list:
-
-            logger.warning(
-                "No API keys provided. "
-                "Creating dummy router."
+        if not proxy_url:
+            logger.warning("LITELLM_PROXY_BASE_URL not set. Creating dummy router.")
+            return Router(
+                model_list=[{
+                    "model_name": "primary-model",
+                    "litellm_params": {"model": "openai/dummy", "api_key": "dummy"}
+                }],
+                routing_strategy="simple-shuffle",
+                num_retries=0,
             )
 
-            model_list.append({
-
-                "model_name":
-                    "primary-model",
-
+        model_list = [
+            # 1. Primary: GPT-OSS 120B (Online)
+            {
+                "model_name": "primary-model",
                 "litellm_params": {
-
-                    "model":
-                        "openai/gpt-oss-120b",
-
-                    "api_key":
-                        "dummy",
-                }
-            })
-
-        # =====================================================
-        # FALLBACK RULES
-        # =====================================================
+                    "model": _format_proxy_model(config.ONLINE_FALLBACK_MODEL_1),
+                    "api_base": proxy_url,
+                    "api_key": online_key or "sk-dummy",
+                },
+            },
+        ]
 
         fallback_rules = {}
 
-        # -----------------------------------------------------
-        # Primary → Groq GPT-OSS
-        # -----------------------------------------------------
+        # 2. Secondary (Fallback 1): GPT-OSS 20B (Online)
+        if online_key and config.ONLINE_FALLBACK_MODEL_2:
+            model_list.append({
+                "model_name": "fallback-model-1",
+                "litellm_params": {
+                    "model": _format_proxy_model(config.ONLINE_FALLBACK_MODEL_2),
+                    "api_base": proxy_url,
+                    "api_key": online_key,
+                },
+            })
 
-        if self.groq_api_key:
+        fallback_rules["primary-model"] = [
+            m["model_name"] for m in model_list if m["model_name"] != "primary-model"
+        ]
 
-            fallback_rules[
-                "primary-model"
-            ] = [
-                "fallback-model-1"
-            ]
-
-        # -----------------------------------------------------
-        # Primary → OpenAI
-        # -----------------------------------------------------
-
-        if self.openai_api_key:
-
-            if "primary-model" not in fallback_rules:
-
-                fallback_rules[
-                    "primary-model"
-                ] = []
-
-            fallback_rules[
-                "primary-model"
-            ].append(
-                "openai-primary"
-            )
-
-        # -----------------------------------------------------
-        # OpenAI → Groq
-        # -----------------------------------------------------
-
-        if (
-            self.openai_api_key
-            and self.groq_api_key
-        ):
-
-            fallback_rules[
-                "openai-primary"
-            ] = [
-                "fallback-model-1"
-            ]
-
-        logger.info(
-            f"Configured {len(model_list)} models."
-        )
-
-        logger.info(
-            f"Fallback rules: "
-            f"{fallback_rules}"
-        )
-
-        # =====================================================
-        # ROUTER
-        # =====================================================
+        logger.info(f"Configured {len(model_list)} models via LiteLLM Proxy ({proxy_url})")
+        logger.info(f"Fallback rules: {fallback_rules}")
 
         return Router(
-
             model_list=model_list,
-
             routing_strategy="simple-shuffle",
-
-            fallbacks=[
-                fallback_rules
-            ],
-
-            # Don't waste tokens retrying a rate-limited model.
-            # Move immediately to fallback.
+            fallbacks=[fallback_rules] if fallback_rules else [],
             num_retries=0,
         )
 
@@ -403,20 +273,39 @@ class LLMGateway:
         """
         try:
             from langchain_litellm import ChatLiteLLM
+            from db_agent_suite import config
 
+            proxy_url = config.LITELLM_PROXY_BASE_URL
+            local_key = config.LITELLM_LOCAL_API_KEY
+            online_key = config.LITELLM_ONLINE_API_KEY
+
+            if not proxy_url:
+                raise ValueError("LITELLM_PROXY_BASE_URL is not configured.")
+
+            # 1. PRIMARY: GPT-OSS 120B (Online via LiteLLM Proxy)
+            logger.info(f"Primary LLM: {config.ONLINE_FALLBACK_MODEL_1} via LiteLLM Proxy ({proxy_url})")
             llm_primary = ChatLiteLLM(
-                model="groq/openai/gpt-oss-120b",
-                api_key=self.groq_api_key,
-                temperature=0.1,
-            )
-            llm_fallback = ChatLiteLLM(
-                model="groq/openai/gpt-oss-20b",
-                api_key=self.groq_api_key,
+                model=_format_proxy_model(config.ONLINE_FALLBACK_MODEL_1),
+                api_base=proxy_url,
+                api_key=online_key or "sk-dummy",
                 temperature=0.1,
             )
 
-            # LangChain-level fallback chains on top of LiteLLM's router fallback
-            llm = llm_primary.with_fallbacks([llm_fallback])
+            fallbacks = []
+
+            # 2. SECONDARY (Fallback 1): GPT-OSS 20B (Online via LiteLLM Proxy)
+            if online_key and config.ONLINE_FALLBACK_MODEL_2:
+                logger.info(f"Fallback 1 (Secondary): {config.ONLINE_FALLBACK_MODEL_2} via LiteLLM Proxy")
+                fallbacks.append(
+                    ChatLiteLLM(
+                        model=_format_proxy_model(config.ONLINE_FALLBACK_MODEL_2),
+                        api_base=proxy_url,
+                        api_key=online_key,
+                        temperature=0.1,
+                    )
+                )
+
+            llm = llm_primary.with_fallbacks(fallbacks) if fallbacks else llm_primary
 
             if tools:
                 return llm.bind_tools(tools)
@@ -439,23 +328,10 @@ class LLMGateway:
         **kwargs,
     ):
 
-        # -----------------------------------------------------
-        # SELECT STARTING MODEL GROUP
-        # -----------------------------------------------------
-
+        # All calls start on primary-model; the Router handles fallbacks.
         model = "primary-model"
 
-        if (
-            self.openai_api_key
-            and not self.groq_api_key
-        ):
-
-            model = "openai-primary"
-
-        logger.info(
-            f"Starting completion with "
-            f"model group: {model}"
-        )
+        logger.info(f"Starting completion with model group: {model}")
 
         # =====================================================
         # WRAP IN A LANGFUSE SPAN (v4 root observation)
@@ -569,3 +445,9 @@ class LLMGateway:
         global fallback_events
 
         fallback_events.clear()
+
+
+# =============================================================
+# SINGLETON INSTANCE
+# =============================================================
+llm_gateway = LLMGateway()

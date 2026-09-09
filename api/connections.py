@@ -20,8 +20,7 @@ class ConnectionCreate(BaseModel):
 
 @router.get("")
 def get_connections(user: dict = Depends(get_current_user)):
-    # load_user_connections expects user_id, user_key, role
-    connections = load_user_connections(user["id"], user["user_key"], user["role"])
+    connections = load_user_connections(user["id"], user["role"])
     return {"connections": connections}
 
 @router.post("")
@@ -45,7 +44,7 @@ def create_connection(conn: ConnectionCreate, user: dict = Depends(get_current_u
     ok, msg = test_connection(config_dict)
     if not ok:
         raise HTTPException(status_code=400, detail=f"Database connection failed: {msg}")
-    cid = save_user_connection(user["id"], conn.name, config_dict, user["user_key"])
+    cid = save_user_connection(user["id"], conn.name, config_dict)
     if not cid:
         raise HTTPException(status_code=500, detail="Failed to save connection")
     return {"id": cid, "message": "Connection saved successfully"}

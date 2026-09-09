@@ -1,10 +1,12 @@
-import json
+
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Response, Request
 from pydantic import BaseModel
 
+from db_agent_suite import config
 from db_agent_suite.database.queries import get_user_by_email, create_user
 from db_agent_suite.utils.security import verify_password
+from db_agent_suite.database.queries import migrate_all_legacy_connections
 from db_agent_suite.database.sessions import (
     ensure_sessions_table,
     create_session,
@@ -16,14 +18,13 @@ from db_agent_suite.database.sessions import (
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-SESSION_COOKIE_NAME  = "dba_session"
+SESSION_COOKIE_NAME  = "dba_session" 
 SESSION_EXPIRE_HOURS = 24
 
 # Ensure the table exists when the module is first imported
 ensure_sessions_table()
 
 logger = logging.getLogger("AuthAPI")
-
 
 # ---------------------------------------------------------------------------
 # Dependency — injected into every protected endpoint
@@ -73,6 +74,10 @@ def login(req: LoginRequest, request: Request, response: Response):
     if not user or not verify_password(req.password, user["password_hash"]):
         raise HTTPException(status_code=400, detail="Invalid email or password")
 
+    # Run a one-time migration for any legacy connections encrypted with this password
+    
+    migrate_all_legacy_connections(user["id"], req.password, user["role"])
+
     # Extract device metadata from the HTTP request
     ip_address = (
         request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
@@ -81,12 +86,11 @@ def login(req: LoginRequest, request: Request, response: Response):
     )
     user_agent = request.headers.get("User-Agent", "")
 
-    # Create fully stateful session in PostgreSQL
+    # Create fully stateful session in PostgreSQL without storing raw password
     session_id = create_session(
         user_id    = user["id"],
         ip_address = ip_address,
-        user_agent = user_agent,
-        user_key   = req.password,   # stored for DB decryption — never leaves server
+        user_agent = user_agent
     )
 
     # Set the HttpOnly cookie (browser stores ONLY the opaque session_id)
@@ -96,6 +100,7 @@ def login(req: LoginRequest, request: Request, response: Response):
         httponly = True,
         max_age  = SESSION_EXPIRE_HOURS * 3600,
         samesite = "lax",
+        secure   = config.HTTPS_SECURE,  # True in production (HTTPS), False for local dev
     )
 
     logger.info(f"User {user['email']} logged in from {ip_address}")
@@ -148,7 +153,21 @@ def logout_all(request: Request, response: Response, user: dict = Depends(get_cu
 @router.get("/me")
 def me(user: dict = Depends(get_current_user)):
     """Return the currently authenticated user's public profile."""
-    return {"id": user["id"], "email": user["email"], "role": user["role"]}
+    from db_agent_suite.database.connection import get_master_db_cursor
+    is_admin = user.get("role") == "admin"
+    can_add_db = is_admin
+    if not is_admin:
+        try:
+            with get_master_db_cursor() as cursor:
+                cursor.execute("SELECT COALESCE(can_add_db, FALSE) FROM auth_users WHERE id = %s;", (user["id"],))
+                row = cursor.fetchone()
+                if row:
+                    can_add_db = bool(row[0])
+        except Exception:
+            pass
+    return {"id": user["id"], "email": user["email"], "role": user["role"], "can_add_db": can_add_db}
+
+
 
 
 @router.get("/sessions")
@@ -175,3 +194,28 @@ def revoke_session(session_id: str, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Session not found")
     end_session(session_id)
     return {"message": f"Session {session_id[:8]}... revoked"}
+
+
+"""
+POST /api/auth/login
+→ auth.py checks email/password
+→ sessions.create_session()
+→ random UUID inserted into PostgreSQL
+→ UUID set as HTTP-only browser cookie
+
+Protected API request
+→ auth.py calls sessions.get_session(cookie UUID)
+→ database checks active status + 24-hour inactivity limit
+→ last_active updated
+→ current user details returned
+
+Logout
+→ sessions.end_session()
+→ status becomes “ended”
+→ browser cookie deleted
+
+Logout all devices
+→ sessions.end_all_sessions()
+→ every active user session becomes “ended”
+
+"""

@@ -15,8 +15,29 @@ Each session record stores:
   - last_active  : Updated on every authenticated request
   - ended_at     : Set when user logs out or session is force-killed
 """
+"""
+POST /api/auth/login
+→ auth.py checks email/password
+→ sessions.create_session()
+→ random UUID inserted into PostgreSQL
+→ UUID set as HTTP-only browser cookie
 
-import json
+Protected API request
+→ auth.py calls sessions.get_session(cookie UUID)
+→ database checks active status + 24-hour inactivity limit
+→ last_active updated
+→ current user details returned
+
+Logout
+→ sessions.end_session()
+→ status becomes “ended”
+→ browser cookie deleted
+
+Logout all devices
+→ sessions.end_all_sessions()
+→ every active user session becomes “ended”
+
+"""
 import logging
 import uuid
 from datetime import datetime, timedelta
@@ -31,27 +52,7 @@ SESSION_EXPIRE_HOURS = 24
 # ---------------------------------------------------------------------------
 
 def ensure_sessions_table():
-    """Create user_sessions table if it doesn't already exist."""
-    with get_master_db_cursor(commit=True) as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS user_sessions (
-                session_id    VARCHAR(36)  PRIMARY KEY,
-                user_id       INTEGER      NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
-                ip_address    VARCHAR(64),
-                user_agent    TEXT,
-                device_info   VARCHAR(255),
-                user_key_enc  TEXT,
-                status        VARCHAR(10)  NOT NULL DEFAULT 'active',
-                created_at    TIMESTAMP    NOT NULL DEFAULT NOW(),
-                last_active   TIMESTAMP    NOT NULL DEFAULT NOW(),
-                ended_at      TIMESTAMP
-            );
-        """)
-        # Index for fast lookups by user
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id
-            ON user_sessions (user_id);
-        """)
+    """No-op: user_sessions table already exists in the database."""
     logger.info("user_sessions table ensured.")
 
 
@@ -59,7 +60,7 @@ def ensure_sessions_table():
 # Create
 # ---------------------------------------------------------------------------
 
-def create_session(user_id: int, ip_address: str, user_agent: str, user_key: str) -> str:
+def create_session(user_id: int, ip_address: str, user_agent: str) -> str:
     """
     Persist a new session record in PostgreSQL.
     Returns the session_id to be stored in the browser cookie.
@@ -70,9 +71,9 @@ def create_session(user_id: int, ip_address: str, user_agent: str, user_key: str
     with get_master_db_cursor(commit=True) as cur:
         cur.execute("""
             INSERT INTO user_sessions
-                (session_id, user_id, ip_address, user_agent, device_info, user_key_enc, status)
-            VALUES (%s, %s, %s, %s, %s, %s, 'active');
-        """, (session_id, user_id, ip_address, user_agent, device_info, user_key))
+                (session_id, user_id, ip_address, user_agent, device_info, status)
+            VALUES (%s, %s, %s, %s, %s, 'active');
+        """, (session_id, user_id, ip_address, user_agent, device_info))
 
     logger.info(f"Session created for user_id={user_id} from {ip_address} [{device_info}]")
     return session_id
@@ -93,7 +94,7 @@ def get_session(session_id: str) -> dict | None:
     with get_master_db_cursor(commit=True) as cur:
         cur.execute("""
             SELECT s.session_id, s.user_id, s.ip_address, s.user_agent,
-                   s.device_info, s.user_key_enc, s.status, s.created_at, s.last_active,
+                   s.device_info, s.status, s.created_at, s.last_active,
                    u.email, u.account_role
             FROM user_sessions s
             JOIN auth_users u ON u.id = s.user_id
@@ -117,12 +118,11 @@ def get_session(session_id: str) -> dict | None:
         "ip_address" : row[2],
         "user_agent" : row[3],
         "device_info": row[4],
-        "user_key"   : row[5],    # still encrypted / raw depending on storage choice
-        "status"     : row[6],
-        "created_at" : row[7].isoformat() if row[7] else None,
-        "last_active": row[8].isoformat() if row[8] else None,
-        "email"      : row[9],
-        "role"       : row[10],
+        "status"     : row[5],
+        "created_at" : row[6].isoformat() if row[6] else None,
+        "last_active": row[7].isoformat() if row[7] else None,
+        "email"      : row[8],
+        "role"       : row[9],
     }
 
 
@@ -131,7 +131,7 @@ def get_session(session_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def end_session(session_id: str):
-    """Mark a specific session as 'ended' with a timestamp."""
+    """Maark a specific session as 'ended' with a timestamp."""
     with get_master_db_cursor(commit=True) as cur:
         cur.execute("""
             UPDATE user_sessions
