@@ -1,0 +1,42 @@
+# ============================================================
+# DB Agent Suite – Production Requirements
+# Only the packages the app actually needs. No CUDA/GPU/torch.
+# ============================================================
+
+# --- API Backend ---
+fastapi>=0.100.0
+uvicorn>=0.20.0
+pydantic>=2.0.0
+
+# --- Web UI ---
+# (Next.js frontend — no Streamlit)
+
+# --- LLM & Agent Framework ---
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langchain-litellm>=0.2.0
+langgraph>=0.2.0
+litellm>=1.50.0
+
+# --- LLM Providers ---
+groq>=0.9.0
+openai>=1.50.0
+
+# --- Observability ---
+langfuse>=4.0.0
+
+# --- Database ---
+psycopg2-binary>=2.9.0
+
+# --- Cache ---
+redis>=5.0.0
+fakeredis>=2.20.0
+
+# --- Security & Encryption ---
+cryptography>=42.0.0
+
+# --- Utilities ---
+python-dotenv>=1.0.0
+pandas>=2.0.0
+backoff>=2.2.0

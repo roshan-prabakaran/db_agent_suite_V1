@@ -67,20 +67,30 @@ export default function Home() {
   const handleAutoSwitchMessage = async (newConnId: number, newConnName: string) => {
     const sysMsg = `[SYSTEM_HIDDEN] The user has switched the active database connection to "${newConnName}". Please briefly analyze its tables and schema, and acknowledge the switch.`;
     setIsProcessing(true);
-    
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 300_000); // 5 min timeout
     try {
       const res = await fetch("/api/chat/message", { 
         method: "POST", headers: { "Content-Type": "application/json" }, 
-        body: JSON.stringify({ message: sysMsg, session_id: sessionId, connection_id: newConnId }) 
+        body: JSON.stringify({ message: sysMsg, session_id: sessionId, connection_id: newConnId }),
+        signal: controller.signal,
       });
       const data = await res.json();
       if (res.ok && data.status === "success") { setMessages(prev => [...prev, ...data.new_messages]); }
       else if (res.ok && data.status === "pending_approval") {
         setMessages(prev => [...prev, { role: "assistant", content: "⚠️ Approval required before executing:", pending_sql: data.pending_sql }]);
       }
-      else { setMessages(prev => [...prev, { role: "assistant", content: "❌ " + (data.message || "Unknown error occurred.") }]); }
-    } catch { setMessages(prev => [...prev, { role: "assistant", content: "❌ Network error. Please check your connection." }]); }
-    finally { setIsProcessing(false); setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100); }
+      else { setMessages(prev => [...prev, { role: "assistant", content: "⚠️ " + (data.message || "Unknown error occurred.") }]); }
+    } catch (err: unknown) {
+      const msg = (err instanceof Error && err.name === "AbortError")
+        ? "The request took too long and was cancelled. The agent may still be processing — please try again."
+        : "Lost connection to the server. Please check if the API is running.";
+      setMessages(prev => [...prev, { role: "assistant", content: "⚠️ " + msg }]);
+    } finally {
+      clearTimeout(timeout);
+      setIsProcessing(false);
+      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+    }
   };
 
   const handleSendMessage = async (e: React.FormEvent) => {
@@ -88,13 +98,18 @@ export default function Home() {
     if (!input.trim() || isProcessing || activeConnectionId === null) return;
     const userMessage = input.trim();
     setInput(""); setMessages(prev => [...prev, { role: "user", content: userMessage }]); setIsProcessing(true);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 300_000); // 5 min timeout
     try {
-      const res = await fetch("/api/chat/message", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: userMessage, session_id: sessionId, connection_id: activeConnectionId }) });
+      const res = await fetch("/api/chat/message", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: userMessage, session_id: sessionId, connection_id: activeConnectionId }),
+        signal: controller.signal,
+      });
       const data = await res.json();
       if (res.ok && data.status === "success") { 
         setMessages(prev => [...prev, ...data.new_messages]); 
         if (data.switched_connection_id && data.switched_connection_id !== activeConnectionId) {
-          // If connection is entirely new (agent just created it), refresh list
           if (!connections.find(c => c.id === data.switched_connection_id)) {
             loadConnections();
           }
@@ -104,14 +119,23 @@ export default function Home() {
       else if (res.ok && data.status === "pending_approval") {
         setMessages(prev => [...prev, { role: "assistant", content: "⚠️ Approval required before executing:", pending_sql: data.pending_sql }]);
       }
-      else { setMessages(prev => [...prev, { role: "assistant", content: "❌ " + (data.message || "Unknown error occurred.") }]); }
-    } catch { setMessages(prev => [...prev, { role: "assistant", content: "❌ Network error. Please check your connection." }]); }
-    finally { setIsProcessing(false); setTimeout(() => inputRef.current?.focus(), 100); }
+      else { setMessages(prev => [...prev, { role: "assistant", content: "⚠️ " + (data.message || "Unknown error occurred.") }]); }
+    } catch (err: unknown) {
+      const msg = (err instanceof Error && err.name === "AbortError")
+        ? "The request took too long and was cancelled. The agent may still be processing — please try again."
+        : "Lost connection to the server. Please check if the API is running.";
+      setMessages(prev => [...prev, { role: "assistant", content: "⚠️ " + msg }]);
+    } finally {
+      clearTimeout(timeout);
+      setIsProcessing(false);
+      setTimeout(() => inputRef.current?.focus(), 100);
+    }
   };
 
   const handleApproval = async (approved: boolean) => {
     setIsProcessing(true);
     // Remove the pending message
+
     setMessages(prev => prev.filter(m => !m.pending_sql));
     try {
       const res = await fetch("/api/chat/approve", {
